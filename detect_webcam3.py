@@ -45,7 +45,7 @@ def extract_cnic_information(image):
     norm_boxes, labels = normalize(image, result)
     normalize_output = list(zip(norm_boxes, labels))
 
-    # Define template boxes for specific fields
+    # # Define template boxes for specific fields
     name_value = [[0.283, 0.271], [0.415, 0.271], [0.415, 0.325], [0.283, 0.325]]
     father_value = [[0.29, 0.446], [0.514, 0.446], [0.514, 0.524], [0.29, 0.524]]
     dob_value = [[0.529, 0.751], [0.748, 0.751], [0.748, 0.803], [0.529, 0.803]]
@@ -79,7 +79,7 @@ def extract_cnic_information(image):
     return dict_data, max_confidence
 
 def send_to_api(data):
-    url = 'http://localhost:3000/add/cnic'
+    url = 'http://192.168.1.33:3000/add/cnic'
     payload = {
         'name': data.get('Name', ('Not found', 0.0))[0],
         'father_name': data.get('Father Name', ('Not found', 0.0))[0],

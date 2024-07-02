@@ -15,7 +15,7 @@ id_card_detector = YOLO('best.pt')
 reader = easyocr.Reader(['en'])
 
 # Serial port configuration
-serial_port = 'COM3'
+serial_port = 'COM4'
 baud_rate = 115200
 ser = serial.Serial(serial_port, baud_rate, timeout=1)
 
@@ -91,17 +91,19 @@ def extract_cnic_information(image):
     return dict_data, max_confidence
 
 def send_to_api(data):
-    url = 'http://localhost:3000/add/cnic'
+    url = 'http://192.168.1.3:3000/cnic/add/record'
     payload = {
         'name': data.get('Name', ('Not found', 0.0))[0],
-        'father_name': data.get('Father Name', ('Not found', 0.0))[0],
-        'date_of_birth': data.get('Date of Birth', ('Not found', 0.0))[0],
-        'date_of_issue': data.get('Date of Issue', ('Not found', 0.0))[0],
-        'date_of_expiry': data.get('Date of Expiry', ('Not found', 0.0))[0],
-        'card_number': data.get('Card Number', ('Not found', 0.0))[0],
+        'fatherName': data.get('Father Name', ('Not found', 0.0))[0],
+        'dateOfBirth': data.get('Date of Birth', ('Not found', 0.0))[0],
+        'dateOfIssue': data.get('Date of Issue', ('Not found', 0.0))[0],
+        'dateOfExpiry': data.get('Date of Expiry', ('Not found', 0.0))[0],
+        'cnicNumber': data.get('Card Number', ('Not found', 0.0))[0],
         'confidence': max(data.values(), key=lambda x: x[1])[1]
     }
     response = requests.post(url, json=payload)
+    print("RESPONSE",response)
+
     return response.status_code, response.text
 
 def live_id_card_detection():
@@ -112,52 +114,74 @@ def live_id_card_detection():
 
     processed_cards = set()  # Set to store processed card IDs
     accurate_extraction = False  # Flag to indicate accurate extraction for the current card
+    detection_attempts = 0  # Counter for detection attempts
+
     while not stop_thread.is_set():
         # Capture frame-by-frame
         ret, frame = cap.read()
 
         if recognize_cnic:
-            # Detect ID cards using YOLOv8
-            id_cards = id_card_detector(frame)[0]
+            detection_attempts = 0  # Reset the attempts counter when distance is less than 15
+            while detection_attempts < 8:
+                # Capture frame-by-frame
+                ret, frame = cap.read()
 
-            for id_card in id_cards.boxes.data.tolist():
-                x1, y1, x2, y2, score, class_id = id_card
+                print(f"sTARTED pROCESS")
 
-                # Generate a unique ID for the card based on its position and size
-                card_id = (x1, y1, x2, y2)
+                # Detect ID cards using YOLOv8
+                id_cards = id_card_detector(frame)[0]
 
-                if card_id not in processed_cards:
-                    # Draw bounding box around the ID card
-                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                for id_card in id_cards.boxes.data.tolist():
+                    x1, y1, x2, y2, score, class_id = id_card
 
-                    # Crop the ID card region
-                    id_card_crop = frame[int(y1):int(y2), int(x1):int(x2), :]
+                    # Generate a unique ID for the card based on its position and size
+                    card_id = (x1, y1, x2, y2)
 
-                    # Extract information from the ID card
-                    extracted_data, max_confidence = extract_cnic_information(id_card_crop)
+                    if card_id not in processed_cards:
+                        # Draw bounding box around the ID card
+                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
-                    # Display the extracted information
-                    print(extracted_data)
+                        # Crop the ID card region
+                        id_card_crop = frame[int(y1):int(y2), int(x1):int(x2), :]
 
-                    # Check if confidence is above threshold
-                    if max(max_confidence.values()) > 0.8:
-                        # Check if accurate information has already been extracted for the current card
-                        if not accurate_extraction:
-                            # Send extracted data to API endpoint
-                            status_code, response_text = send_to_api(extracted_data)
-                            if status_code == 200:
-                                print("Data sent successfully:", response_text)
-                            else:
-                                print("Failed to send data:", response_text)
+                        # Extract information from the ID card
+                        extracted_data, max_confidence = extract_cnic_information(id_card_crop)
 
-                            accurate_extraction = True  # Set flag to indicate accurate extraction
-                            processed_cards.add(card_id)  # Add the processed card ID to the set
-                            break  # Stop processing this card and move to the next one
+                        # Display the extracted information
 
-            # Reset the flag if no card is detected in the frame
-            if len(id_cards) == 0:
-                accurate_extraction = False
+                        # Send "buzz" command to Arduino
+                        ser.write(b"light\n")
+
+                        # Check if confidence is above threshold
+                        if max(max_confidence.values()) > 0.5:
+
+                            # Check if accurate information has already been extracted for the current card
+                            if not accurate_extraction:
+                                ser.write(b"buzz\n")
+                                print("Data sent successfully:", extracted_data)
         
+                                # Send extracted data to API endpoint
+                                status_code, response_text = send_to_api(extracted_data)
+                                if status_code == 200:
+                                    print("Data sent successfully:", response_text)
+                                    ser.write(b"light\n")
+        
+                                else:
+                                    print("Failed to send data:", response_text)
+
+                                accurate_extraction = True  # Set flag to indicate accurate extraction
+                                processed_cards.add(card_id)  # Add the processed card ID to the set
+                                break  # Stop processing this card and move to the next one
+
+                # Reset the flag if no card is detected in the frame
+                if len(id_cards) == 0:
+                    accurate_extraction = False
+
+                detection_attempts += 1  # Increment the attempts counter
+
+                if accurate_extraction:
+                    break  # Break the loop if accurate extraction is successful
+
         # Display the resulting frame
         cv2.imshow('frame', frame)
 
@@ -170,23 +194,33 @@ def live_id_card_detection():
     cap.release()
     cv2.destroyAllWindows()
 
+def send_light_off():
+    global light_status
+    time.sleep(3)  # 3 seconds timeout
+    if not light_status:
+        ser.write(b"lightOff\n")
+
 def monitor_distance():
     global recognize_cnic
+    global light_status
     global stop_thread
     while not stop_thread.is_set():
         try:
             if ser.in_waiting > 0:
                 line = ser.readline().decode('utf-8').rstrip()
                 if line:
-                    print(line)
-                    data_parts = line.split(',')
+                    # print(line)
+                    data_parts = line.split(':')
+
                     if len(data_parts) == 2:
-                        distance_str, led_str = data_parts
-                        distance_value = float(distance_str.split(':')[1])
-                        print(f"Distance: {distance_value} cm")
-                        if distance_value < 5:
+                        distance_value = float(data_parts[1])
+                        if distance_value < 15:
                             recognize_cnic = True
+                            light_status = True
+                            print(f" pR {distance_value}")
                         else:
+                            # light_status = False
+                            # threading.Thread(target=send_light_off).start()
                             recognize_cnic = False
         except Exception as e:
             print(f"Error reading serial data: {e}")
