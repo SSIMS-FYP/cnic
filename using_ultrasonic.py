@@ -7,9 +7,6 @@ import requests
 import serial
 import threading
 import time
-import re
-import random
-import string
 
 # Load YOLOv8 model for ID card detection
 id_card_detector = YOLO('best.pt')
@@ -84,7 +81,6 @@ def extract_cnic_information(image):
         output_dict = get_value(value, normalize_output)
         if output_dict:  # Check if output_dict is not empty
             answer, confidence = min(output_dict.items(), key=lambda x: x[1][0])  # Get the answer with the minimum distance
-            answer = validate_and_correct_field(key, answer)
             dict_data[key] = (answer, confidence[1])  # Store answer and confidence score
             if key not in max_confidence or confidence[1] > max_confidence[key]:
                 max_confidence[key] = confidence[1]  # Update max confidence score for this field
