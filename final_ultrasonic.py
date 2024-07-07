@@ -52,6 +52,48 @@ def get_value(key, normalize_output):
         distances[text] = (calculate_distance(key, bbx), prob)  # Include confidence score along with distance
     return distances
 
+def add_bogus_letters(text, length):
+    return text + ''.join(random.choices(string.ascii_letters, k=length))
+
+def validate_and_correct_field(field, value):
+    if field in ['Name', 'Father Name']:
+        # Regular expression for a valid name containing only alphabets and spaces
+        if re.match(r"^[A-Za-z ]+$", value):
+            return value
+        # If invalid, add bogus letters
+        corrected_value = ''.join([char if char.isalpha() or char.isspace() else random.choice(string.ascii_letters) for char in value])
+        return corrected_value
+
+    elif field == 'Card Number':
+        # Regular expression for a valid ID card number in the format 13101-6356172-4
+        if re.match(r"^\d{5}-\d{7}-\d{1}$", value):
+            return value
+        # If invalid, correct the format
+        digits = re.findall(r'\d', value)
+        if len(digits) < 13:
+            digits += random.choices(string.digits, k=13 - len(digits))
+        elif len(digits) > 13:
+            digits = digits[:13]
+        corrected_value = f"{digits[0]}{digits[1]}{digits[2]}{digits[3]}{digits[4]}-{digits[5]}{digits[6]}{digits[7]}{digits[8]}{digits[9]}{digits[10]}{digits[11]}-{digits[12]}"
+        return corrected_value
+
+    elif field in ['Date of Birth', 'Date of Issue', 'Date of Expiry']:
+        # Regular expression for a valid date in the format dd.mm.yyyy
+        if re.match(r"^\d{2}\.\d{2}\.\d{4}$", value):
+            return value
+        # If invalid, correct the format
+        corrected_value = re.sub(r'[^\d]', '', value)  # Remove non-digit characters
+        if len(corrected_value) >= 8:
+            corrected_value = f"{corrected_value[:2]}.{corrected_value[2:4]}.{corrected_value[4:8]}"
+            return corrected_value
+        # Add bogus digits if necessary
+        while len(corrected_value) < 8:
+            corrected_value += random.choice(string.digits)
+        corrected_value = f"{corrected_value[:2]}.{corrected_value[2:4]}.{corrected_value[4:8]}"
+        return corrected_value
+
+    return value  # Return the original value if no specific validation is defined
+
 def extract_cnic_information(image):
     # Apply OCR to the image
     result = reader.readtext(image)

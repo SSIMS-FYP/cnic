@@ -3,28 +3,16 @@ import numpy as np
 from ultralytics import YOLO
 import easyocr
 from scipy.spatial import distance
-import requests
-import serial
-import threading
-import time
+import csv
 import re
-import random
 import string
+import random
 
 # Load YOLOv8 model for ID card detection
 id_card_detector = YOLO('best.pt')
 
 # Initialize EasyOCR reader
 reader = easyocr.Reader(['en'])
-
-# Serial port configuration
-serial_port = 'COM4'
-baud_rate = 115200
-ser = serial.Serial(serial_port, baud_rate, timeout=1)
-
-# Global flag to control CNIC recognition
-recognize_cnic = False
-stop_thread = threading.Event()  # Event to signal the thread to stop
 
 def normalize(img, result):
     w, h = img.shape[:-1]
@@ -51,6 +39,48 @@ def get_value(key, normalize_output):
     for bbx, (text, prob) in normalize_output:
         distances[text] = (calculate_distance(key, bbx), prob)  # Include confidence score along with distance
     return distances
+
+def add_bogus_letters(text, length):
+    return text + ''.join(random.choices(string.ascii_letters, k=length))
+
+def validate_and_correct_field(field, value):
+    if field in ['Name', 'Father Name']:
+        # Regular expression for a valid name containing only alphabets and spaces
+        if re.match(r"^[A-Za-z ]+$", value):
+            return value
+        # If invalid, add bogus letters
+        corrected_value = ''.join([char if char.isalpha() or char.isspace() else random.choice(string.ascii_letters) for char in value])
+        return corrected_value
+
+    elif field == 'Card Number':
+        # Regular expression for a valid ID card number in the format 13101-6356172-4
+        if re.match(r"^\d{5}-\d{7}-\d{1}$", value):
+            return value
+        # If invalid, correct the format
+        digits = re.findall(r'\d', value)
+        if len(digits) < 13:
+            digits += random.choices(string.digits, k=13 - len(digits))
+        elif len(digits) > 13:
+            digits = digits[:13]
+        corrected_value = f"{digits[0]}{digits[1]}{digits[2]}{digits[3]}{digits[4]}-{digits[5]}{digits[6]}{digits[7]}{digits[8]}{digits[9]}{digits[10]}{digits[11]}-{digits[12]}"
+        return corrected_value
+
+    elif field in ['Date of Birth', 'Date of Issue', 'Date of Expiry']:
+        # Regular expression for a valid date in the format dd.mm.yyyy
+        if re.match(r"^\d{2}\.\d{2}\.\d{4}$", value):
+            return value
+        # If invalid, correct the format
+        corrected_value = re.sub(r'[^\d]', '', value)  # Remove non-digit characters
+        if len(corrected_value) >= 8:
+            corrected_value = f"{corrected_value[:2]}.{corrected_value[2:4]}.{corrected_value[4:8]}"
+            return corrected_value
+        # Add bogus digits if necessary
+        while len(corrected_value) < 8:
+            corrected_value += random.choice(string.digits)
+        corrected_value = f"{corrected_value[:2]}.{corrected_value[2:4]}.{corrected_value[4:8]}"
+        return corrected_value
+
+    return value  # Return the original value if no specific validation is defined
 
 def extract_cnic_information(image):
     # Apply OCR to the image
@@ -94,41 +124,32 @@ def extract_cnic_information(image):
 
     return dict_data, max_confidence
 
-def send_to_api(data):
-    url = 'http://192.168.43.5:3000/cnic/add/record'
-    payload = {
-        'name': data.get('Name', ('Not found', 0.0))[0],
-        'fatherName': data.get('Father Name', ('Not found', 0.0))[0],
-        'dateOfBirth': data.get('Date of Birth', ('Not found', 0.0))[0],
-        'dateOfIssue': data.get('Date of Issue', ('Not found', 0.0))[0],
-        'dateOfExpiry': data.get('Date of Expiry', ('Not found', 0.0))[0],
-        'cnicNumber': data.get('Card Number', ('Not found', 0.0))[0],
-        'confidence': max(data.values(), key=lambda x: x[1])[1]
-    }
-    response = requests.post(url, json=payload)
-    print("RESPONSE",response)
-
-    return response.status_code, response.text
+def write_to_csv(csv_filename, data):
+    with open(csv_filename, mode='a', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=data.keys())
+        if file.tell() == 0:
+            writer.writeheader()
+        writer.writerow(data)
 
 def live_id_card_detection():
-    global recognize_cnic
-    global stop_thread
     # Open camera
     cap = cv2.VideoCapture(0)
 
-    processed_cards = set()  # Set to store processed card IDs
-    accurate_extraction = False  # Flag to indicate accurate extraction for the current card
-    while not stop_thread.is_set():
-        # Capture frame-by-frame
-        ret, frame = cap.read()
+    # Open CSV file for writing
+    csv_filename = 'extracted_data_live.csv'
+    with open(csv_filename, mode='w', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=['Name', 'Father Name', 'Date of Birth', 'Date of Issue', 'Date of Expiry', 'Card Number', 'Confidence'])
+        writer.writeheader()
 
-        if recognize_cnic:
-
-            print(f"sTARTED pROCESS")
+        processed_cards = set()  # Set to store processed card IDs
+        accurate_extraction = False  # Flag to indicate accurate extraction for the current card
+        while True:
+            # Capture frame-by-frame
+            ret, frame = cap.read()
 
             # Detect ID cards using YOLOv8
             id_cards = id_card_detector(frame)[0]
-            
+
             for id_card in id_cards.boxes.data.tolist():
                 x1, y1, x2, y2, score, class_id = id_card
 
@@ -136,10 +157,6 @@ def live_id_card_detection():
                 card_id = (x1, y1, x2, y2)
 
                 if card_id not in processed_cards:
-                    #buzzer
-                    ser.write(b"buzz\n")
-
-
                     # Draw bounding box around the ID card
                     cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
@@ -150,27 +167,14 @@ def live_id_card_detection():
                     extracted_data, max_confidence = extract_cnic_information(id_card_crop)
 
                     # Display the extracted information
-
-                    # Send "buzz" command to Arduino
-                    ser.write(b"light\n")
+                    print(extracted_data)
 
                     # Check if confidence is above threshold
-                    if max(max_confidence.values()) > 0.5:
-
+                    if max(max_confidence.values()) > 0.8:
                         # Check if accurate information has already been extracted for the current card
                         if not accurate_extraction:
-                            
-                            print("Data sent successfully:", extracted_data)
-    
-                            # Send extracted data to API endpoint
-                            status_code, response_text = send_to_api(extracted_data)
-                            if status_code == 200:
-                                print("Data sent successfully:", response_text)
-                                ser.write(b"light\n")
-    
-                            else:
-                                print("Failed to send data:", response_text)
-
+                            # Write extracted data to CSV
+                            writer.writerow({key: value[0] for key, value in extracted_data.items()})
                             accurate_extraction = True  # Set flag to indicate accurate extraction
                             processed_cards.add(card_id)  # Add the processed card ID to the set
                             break  # Stop processing this card and move to the next one
@@ -178,53 +182,18 @@ def live_id_card_detection():
             # Reset the flag if no card is detected in the frame
             if len(id_cards) == 0:
                 accurate_extraction = False
-        
-        # Display the resulting frame
-        cv2.imshow('frame', frame)
+            
+            # Display the resulting frame
+            cv2.imshow('frame', frame)
 
-        # Break the loop if 'q' is pressed
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            stop_thread.set()  # Signal the thread to stop
-            break
+            # Break the loop if 'q' is pressed
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
     # Release the capture
     cap.release()
     cv2.destroyAllWindows()
 
-def monitor_distance():
-    global recognize_cnic
-    global stop_thread
-    while not stop_thread.is_set():
-        try:
-            if ser.in_waiting > 0:
-                line = ser.readline().decode('utf-8').rstrip()
-                if line:
-                    # print(line)
-                    data_parts = line.split(':')
-
-                    if len(data_parts) == 2:
-                        distance_value = float(data_parts[1])
-                        if distance_value < 15:
-                            recognize_cnic = True
-                            print(f" pR {distance_value}")
-                        else:
-                            ser.write(b"light\n")
-                            recognize_cnic = False
-        except Exception as e:
-            print(f"Error reading serial data: {e}")
-            recognize_cnic = False
-        time.sleep(0.1)
 
 if __name__ == "__main__":
-    # Start the distance monitoring in a separate thread
-    distance_thread = threading.Thread(target=monitor_distance)
-    distance_thread.start()
-
-    # Start the CNIC recognition process
     live_id_card_detection()
-
-    # Wait for the distance monitoring thread to finish
-    distance_thread.join()
-
-    # Close the serial connection when done
-    ser.close()
