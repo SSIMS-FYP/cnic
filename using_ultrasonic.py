@@ -91,7 +91,7 @@ def extract_cnic_information(image):
     return dict_data, max_confidence
 
 def send_to_api(data):
-    url = 'http://192.168.43.5:3000/cnic/add/record'
+    url = 'http://192.168.43.5:3001/cnic/add/record'
     payload = {
         'name': data.get('Name', ('Not found', 0.0))[0],
         'fatherName': data.get('Father Name', ('Not found', 0.0))[0],
